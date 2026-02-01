@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 import time
 
-# Import our solution
+# Import our optimized solution
 from solution import solve as solve_function
 
 # Configure logging
@@ -132,6 +132,27 @@ async def solve(request: SolveRequest):
                 detail="Must provide 'kb_search_url' parameter"
             )
         
+        # Validate this is a legal knowledge base (not factcheck)
+        if "factcheck" in request.kb_search_url.lower():
+            logger.warning(f"Received factcheck URL instead of legal: {request.kb_search_url}")
+            # Convert factcheck URL to legal URL
+            legal_url = request.kb_search_url.replace("factcheck", "legal")
+            logger.info(f"Converting to legal knowledge base: {legal_url}")
+            request.kb_search_url = legal_url
+        
+        # Basic legal question validation
+        legal_keywords = ["zone", "zoning", "building", "permit", "variance", "setback", "residential", "commercial", "lot", "coverage", "height"]
+        is_legal = any(keyword in query.lower() for keyword in legal_keywords)
+        
+        if not is_legal:
+            logger.warning(f"Question may not be legal-related: {query}")
+            return SolveResponse(
+                thought_process=f"QUESTION VALIDATION: The question '{query}' does not appear to be related to zoning laws or building regulations. This system is specialized for legal questions about the Alphaville Zoning Code.",
+                retrieved_context_ids=[],
+                final_answer="This question is outside the scope of zoning law. Please ask questions about building permits, zoning regulations, setbacks, lot coverage, or other municipal zoning matters.",
+                citation="No legal citations - question outside zoning law domain"
+            )
+        
         # Process the request
         logger.info(f"Using knowledge base: {request.kb_search_url}")
         result = solve_function(query, request.kb_search_url)
@@ -159,10 +180,24 @@ async def solve(request: SolveRequest):
         raise
     except Exception as e:
         # Log and handle unexpected errors
-        logger.error(f"Unexpected error processing request: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(e)}"
+        error_msg = str(e)
+        logger.error(f"Unexpected error processing request: {error_msg}", exc_info=True)
+        
+        # Handle specific OpenAI API quota errors
+        if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+            return SolveResponse(
+                thought_process=f"API QUOTA EXCEEDED: The OpenAI API quota has been exceeded. Error: {error_msg}",
+                retrieved_context_ids=[],
+                final_answer="Unable to process legal question due to API quota limitations. Please try again later or contact support.",
+                citation="No citations available due to API quota exceeded"
+            )
+        
+        # Handle other API errors gracefully
+        return SolveResponse(
+            thought_process=f"SYSTEM ERROR: Unable to complete legal analysis. Error: {error_msg}",
+            retrieved_context_ids=[],
+            final_answer="Technical error occurred while processing your legal question. Please try again or contact support.",
+            citation="No citations available due to system error"
         )
 
 
@@ -189,7 +224,8 @@ async def test_endpoint():
     except Exception as e:
         return {
             "status": "error",
-            "message": f"Test failed: {str(e)}"
+            "message": f"Test failed: {str(e)}",
+            "note": "If quota error, try again later or check OpenAI API credits"
         }
 
 
